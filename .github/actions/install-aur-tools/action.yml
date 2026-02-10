@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 name: Install AUR Tools
 description: Install common tools for AUR package management in Arch Linux container
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
+
 # Common utility functions for AUR update workflow
 # shellcheck shell=bash
 

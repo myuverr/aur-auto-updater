@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 name: Setup AUR SSH Known Hosts
 description: Verify and configure AUR SSH host key with fingerprint verification
 
