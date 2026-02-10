@@ -46,12 +46,10 @@ jobs:
         with:
           packages: nvchecker jq
 
-      # Note: GH_PAT is passed via NVCHECKER_GITHUB_TOKEN environment variable
-      # in the Check Package Versions step to avoid writing token to disk
-
       - name: Generate Nvchecker Config
         env:
           PACKAGES_CONFIG: ${{ vars.PACKAGES_CONFIG }}
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           # shellcheck shell=bash
           if [ -z "${PACKAGES_CONFIG:-}" ]; then
@@ -59,10 +57,15 @@ jobs:
             exit 1
           fi
 
-          # Generate nvchecker.toml header (no keyfile - using NVCHECKER_GITHUB_TOKEN env var)
+          # Generate keyfile.toml with GH_PAT
+          echo '[keys]' > keyfile.toml
+          echo "github = \"$GH_PAT\"" >> keyfile.toml
+
+          # Generate nvchecker.toml header with keyfile reference
           cat > nvchecker.toml << 'EOF'
           [__config__]
           oldver = "old_ver.json"
+          keyfile = "keyfile.toml"
           EOF
 
           # Parse JSON and generate package sections
@@ -82,8 +85,7 @@ jobs:
 
       - name: Check Package Versions
         id: set-matrix
-        env:
-          NVCHECKER_GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+
         run: |
           # shellcheck shell=bash
           # shellcheck source=.github/scripts/common.sh
