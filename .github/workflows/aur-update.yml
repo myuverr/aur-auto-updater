@@ -1,0 +1,441 @@
+name: AUR Auto Updater
+
+on:
+  schedule:
+    - cron: "0 0,12 * * *" # Run at 0:00 and 12:00 UTC daily
+  workflow_dispatch: # Allow manual triggering
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aur-update
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # Use bash with strict mode to catch errors early
+    # -e: exit on error, -u: error on undefined vars, -o pipefail: catch pipe failures
+    shell: bash -euo pipefail {0}
+
+env:
+  # Retry configuration
+  RETRY_MAX_ATTEMPTS: 4
+  RETRY_DELAY_BASE: 3
+  AUR_RATE_LIMIT_DELAY: 5
+  # Job summary size limit (GitHub limit is 1MB, leave margin)
+  MAX_SUMMARY_SIZE: 900000
+
+jobs:
+  # Job 1: Check which packages need updates
+  check-versions:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      has_updates: ${{ steps.set-matrix.outputs.has_updates }}
+
+    steps:
+      - name: Checkout Config
+        uses: actions/checkout@v6
+
+      - name: Install Tools
+        uses: ./.github/actions/install-aur-tools
+        with:
+          packages: nvchecker jq
+
+      # Note: GH_PAT is passed via NVCHECKER_GITHUB_TOKEN environment variable
+      # in the Check Package Versions step to avoid writing token to disk
+
+      - name: Generate Nvchecker Config
+        env:
+          PACKAGES_CONFIG: ${{ vars.PACKAGES_CONFIG }}
+        run: |
+          # shellcheck shell=bash
+          if [ -z "${PACKAGES_CONFIG:-}" ]; then
+            echo "::error::PACKAGES_CONFIG variable not set. Configure it in repository settings."
+            exit 1
+          fi
+
+          # Generate nvchecker.toml header (no keyfile - using NVCHECKER_GITHUB_TOKEN env var)
+          cat > nvchecker.toml << 'EOF'
+          [__config__]
+          oldver = "old_ver.json"
+          EOF
+
+          # Parse JSON and generate package sections
+          echo "$PACKAGES_CONFIG" | jq -r 'to_entries[] | 
+            "[\(.key)]\nsource = \"github\"\ngithub = \"\(.value.github)\"\n" +
+            (if .value.use_latest_release then "use_latest_release = true\n" else "" end) +
+            (if .value.use_max_tag then "use_max_tag = true\n" else "" end) +
+            (if .value.prefix then "prefix = \"\(.value.prefix)\"\n" else "" end) +
+            (if .value.include_regex then "include_regex = '\''\(.value.include_regex)'\''\n" else "" end)
+          ' >> nvchecker.toml
+
+          # Extract package names for iteration
+          PACKAGES=$(echo "$PACKAGES_CONFIG" | jq -r 'keys | join(" ")')
+          echo "PACKAGES=$PACKAGES" >> "$GITHUB_ENV"
+
+          echo "Generated nvchecker.toml for packages: $PACKAGES"
+
+      - name: Check Package Versions
+        id: set-matrix
+        env:
+          NVCHECKER_GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          # shellcheck shell=bash
+          # shellcheck source=.github/scripts/common.sh
+          source "$GITHUB_WORKSPACE/.github/scripts/common.sh"
+
+          updates='[]'
+          # Track errors for final report instead of failing immediately
+          errors='[]'
+
+          # Create unique temp directory for this run
+          TEMP_DIR=$(mktemp -d)
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+
+          # Initialize summary in temp file to avoid duplication
+          SUMMARY_FILE="$TEMP_DIR/check_summary.md"
+          {
+            echo "## Version Check Results"
+            echo ""
+            echo "| Package | AUR Version | Upstream | Status |"
+            echo "|---------|-------------|----------|--------|"
+          } > "$SUMMARY_FILE"
+
+          # shellcheck disable=SC2086
+          for pkg in $PACKAGES; do
+            echo "::group::Checking $pkg"
+            
+            # Get upstream version
+            # Note: stderr is captured separately to prevent token leakage while preserving debug info
+            nvchecker_stderr="$TEMP_DIR/nvchecker_${pkg}.err"
+            if ! nvchecker_output=$(nvchecker -c nvchecker.toml --logger json -e "$pkg" 2>"$nvchecker_stderr"); then
+              # Log sanitized error (remove potential tokens)
+              sanitized_err=$(sed 's/ghp_[a-zA-Z0-9]*/[REDACTED]/g' "$nvchecker_stderr" | head -5)
+              echo "::warning::nvchecker failed for $pkg: ${sanitized_err:-unknown error}"
+              echo "::warning::Check nvchecker.toml configuration and upstream source availability"
+              echo "| $pkg | - | - | ⚠️ nvchecker failed |" >> "$SUMMARY_FILE"
+              errors=$(echo "$errors" | jq -c --arg pkg "$pkg" --arg err "nvchecker failed: ${sanitized_err:-unknown}" '. + [{package: $pkg, error: $err}]')
+              echo "::endgroup::"
+              continue
+            fi
+            
+            latest_ver_raw=$(echo "$nvchecker_output" | jq -r 'select(.name == "'"$pkg"'") | .version // empty')
+            if [ -z "$latest_ver_raw" ]; then
+              echo "::warning::Could not parse version for $pkg"
+              echo "| $pkg | - | - | ⚠️ Parse failed |" >> "$SUMMARY_FILE"
+              errors=$(echo "$errors" | jq -c --arg pkg "$pkg" --arg err "Could not parse upstream version" '. + [{package: $pkg, error: $err}]')
+              echo "::endgroup::"
+              continue
+            fi
+            
+            # Strip 'v' prefix
+            latest_ver="${latest_ver_raw#v}"
+            echo "Upstream: $latest_ver"
+            
+            # Get current AUR version (full version string with epoch support)
+            # Use retry_http_request from common.sh
+            aur_response=""
+            aur_response_file="$TEMP_DIR/aur_response_${pkg}.json"
+            aur_url="https://aur.archlinux.org/rpc/v5/info?arg[]=$pkg"
+            if retry_http_request "$aur_response_file" "$aur_url" "$RETRY_MAX_ATTEMPTS" "$RETRY_DELAY_BASE" "$AUR_RATE_LIMIT_DELAY"; then
+              aur_response=$(cat "$aur_response_file")
+            fi
+            
+            if [ -z "$aur_response" ]; then
+              echo "::warning::Could not fetch AUR info for $pkg after $RETRY_MAX_ATTEMPTS attempts"
+              echo "::warning::Verify package exists at https://aur.archlinux.org/packages/$pkg"
+              echo "| $pkg | - | $latest_ver | ⚠️ AUR fetch failed |" >> "$SUMMARY_FILE"
+              errors=$(echo "$errors" | jq -c --arg pkg "$pkg" --arg err "AUR API fetch failed after $RETRY_MAX_ATTEMPTS attempts" '. + [{package: $pkg, error: $err}]')
+              echo "::endgroup::"
+              continue
+            fi
+            
+            # Validate JSON response
+            if ! echo "$aur_response" | jq -e '.results' >/dev/null 2>&1; then
+              echo "::warning::Invalid AUR API response for $pkg"
+              echo "| $pkg | - | $latest_ver | ⚠️ Invalid response |" >> "$SUMMARY_FILE"
+              errors=$(echo "$errors" | jq -c --arg pkg "$pkg" --arg err "Invalid AUR API response format" '. + [{package: $pkg, error: $err}]')
+              echo "::endgroup::"
+              continue
+            fi
+            
+            full_aur_ver=$(echo "$aur_response" | jq -r '.results[0].Version // empty')
+            if [ -z "$full_aur_ver" ]; then
+              echo "::warning::Package $pkg not found on AUR"
+              echo "| $pkg | Not found | $latest_ver | ⚠️ Not on AUR |" >> "$SUMMARY_FILE"
+              errors=$(echo "$errors" | jq -c --arg pkg "$pkg" --arg err "Package not found on AUR" '. + [{package: $pkg, error: $err}]')
+              echo "::endgroup::"
+              continue
+            fi
+            
+            # Extract version without pkgrel (handle epoch:version-pkgrel format)
+            # Examples: "1.0.0-1" -> "1.0.0", "1:2.0.0-1" -> "1:2.0.0"
+            current_ver=$(echo "$full_aur_ver" | sed 's/-[0-9]*$//')
+            # For comparison, strip epoch from both if upstream doesn't have it
+            current_ver_no_epoch="${current_ver#*:}"
+            echo "AUR current: $current_ver (full: $full_aur_ver)"
+            
+            # Compare versions
+            if [ "$(vercmp "$latest_ver" "$current_ver_no_epoch")" -gt 0 ]; then
+              echo "Update needed: $current_ver_no_epoch -> $latest_ver"
+              updates=$(echo "$updates" | jq -c --arg pkg "$pkg" --arg ver "$latest_ver" '. + [{package: $pkg, version: $ver}]')
+              echo "| $pkg | $current_ver_no_epoch | $latest_ver | ⬆️ Update needed |" >> "$SUMMARY_FILE"
+            else
+              echo "Up to date"
+              echo "| $pkg | $current_ver_no_epoch | $latest_ver | ✅ Up to date |" >> "$SUMMARY_FILE"
+            fi
+            
+            echo "::endgroup::"
+          done
+
+          echo "matrix={\"include\":$updates}" >> "$GITHUB_OUTPUT"
+
+          # Finalize summary
+          if [ "$updates" = "[]" ]; then
+            echo "has_updates=false" >> "$GITHUB_OUTPUT"
+            echo "" >> "$SUMMARY_FILE"
+            echo "**Result:** ✅ No updates needed" >> "$SUMMARY_FILE"
+          else
+            echo "has_updates=true" >> "$GITHUB_OUTPUT"
+            echo "" >> "$SUMMARY_FILE"
+            echo "**Result:** ⬆️ Updates found" >> "$SUMMARY_FILE"
+          fi
+
+          # Report collected errors
+          if [ "$errors" != "[]" ]; then
+            error_count=$(echo "$errors" | jq 'length')
+            echo "" >> "$SUMMARY_FILE"
+            echo "### ⚠️ Errors Encountered ($error_count)" >> "$SUMMARY_FILE"
+            echo "" >> "$SUMMARY_FILE"
+            echo "| Package | Error |" >> "$SUMMARY_FILE"
+            echo "|---------|-------|" >> "$SUMMARY_FILE"
+            echo "$errors" | jq -r '.[] | "| \(.package) | \(.error) |"' >> "$SUMMARY_FILE"
+            echo "::error::$error_count package(s) encountered errors during version check"
+            # Save error count to output for later failure
+            echo "error_count=$error_count" >> "$GITHUB_OUTPUT"
+          else
+            echo "error_count=0" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Write to job summary with size limit check
+          SUMMARY_SIZE=$(wc -c < "$SUMMARY_FILE")
+          if [ "$SUMMARY_SIZE" -gt "$MAX_SUMMARY_SIZE" ]; then
+            echo "::warning::Job summary truncated due to size limit ($SUMMARY_SIZE bytes)"
+            head -c "$MAX_SUMMARY_SIZE" "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "*[Summary truncated due to size limit]*" >> "$GITHUB_STEP_SUMMARY"
+          else
+            # Write to job summary
+            cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Fail if Errors Occurred
+        if: steps.set-matrix.outputs.error_count != '0'
+        run: |
+          echo "::error::Version check completed with errors. Check the summary for details."
+          exit 1
+
+  # Job 2: Update each package in parallel
+  update-package:
+    needs: check-versions
+    if: needs.check-versions.outputs.has_updates == 'true'
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    timeout-minutes: 30
+
+    strategy:
+      matrix: ${{ fromJson(needs.check-versions.outputs.matrix) }}
+      fail-fast: false
+
+    steps:
+      - name: Checkout for Composite Action
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - name: Install Tools
+        uses: ./.github/actions/install-aur-tools
+        with:
+          packages: pacman-contrib
+          create-builder: "true"
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.AUR_SSH_KEY }}
+
+      - name: Configure SSH Known Hosts
+        uses: ./.github/actions/setup-aur-ssh
+
+      - name: Update ${{ matrix.package }}
+        id: update
+        env:
+          PKG: ${{ matrix.package }}
+          VERSION: ${{ matrix.version }}
+        run: |
+          # shellcheck shell=bash
+          # shellcheck source=.github/scripts/common.sh
+          # Source common utilities
+          source "$GITHUB_WORKSPACE/.github/scripts/common.sh"
+
+          export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+
+          echo "Updating $PKG to $VERSION"
+
+          # Clone AUR repo with retry
+          if ! retry_command 3 "$RETRY_DELAY_BASE" git clone "ssh://aur@aur.archlinux.org/${PKG}.git"; then
+            echo "::error::Verify SSH key is configured and package exists at https://aur.archlinux.org/packages/$PKG"
+            exit 1
+          fi
+
+          cd "$PKG"
+
+          # Configure git for this repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Verify PKGBUILD exists
+          if [ ! -f PKGBUILD ]; then
+            echo "::error::PKGBUILD not found"
+            exit 1
+          fi
+
+          # Update version
+          current_ver=$(grep "^pkgver=" PKGBUILD | cut -d= -f2)
+          echo "Current version: $current_ver"
+
+          # Use safe sed replacement to handle special characters in version
+          safe_update_pkgbuild_version PKGBUILD "$VERSION"
+
+          # Change ownership for builder (all operations until push)
+          chown -R builder:builder .
+
+          # Setup cleanup trap for build failures
+          cleanup() {
+            echo "Cleaning up build artifacts..."
+            rm -rf src pkg *.pkg.tar.* 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          # Update checksums with retry
+          if ! retry_command 3 "$RETRY_DELAY_BASE" su builder -c 'updpkgsums'; then
+            echo "::error::Check source URLs in PKGBUILD and verify upstream files are accessible"
+            exit 1
+          fi
+
+          # Verify build
+          echo "Verifying build..."
+          su builder -c "makepkg -sfr --noconfirm"
+          echo "Build verified"
+
+          # Generate .SRCINFO, clean artifacts, and prepare commit (all as builder)
+          # Use a temp file to communicate commit status from subshell
+          # Use a local file for status to avoid permission issues with builder user
+          COMMIT_STATUS_FILE=".commit_status"
+          su builder -c "
+            makepkg --printsrcinfo > .SRCINFO
+            git clean -fdx
+            if [ -n \"\$(git status --porcelain)\" ]; then
+              git add PKGBUILD .SRCINFO
+              git commit -m 'chore: update to $VERSION'
+              echo 'committed' > '$COMMIT_STATUS_FILE'
+            fi
+          "
+
+          # Restore ownership for git operations
+          chown -R root:root .
+
+          # Check if commit was made
+          if [ ! -f "$COMMIT_STATUS_FILE" ]; then
+            echo "::error::No changes detected after processing - version mismatch between check and update"
+            echo "::error::This may indicate AUR was already updated or version detection issue"
+            echo "status=no_changes" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          rm -f "$COMMIT_STATUS_FILE"
+
+          # We have changes to push
+          # Save commit message for potential reapplication
+          commit_msg=$(git log -1 --format=%B)
+
+          # Push with retry and conflict handling
+          push_success=false
+          for attempt in 1 2 3; do
+            echo "Pushing to AUR (attempt $attempt/3)..."
+            
+            # Fetch latest and check if we need to rebase
+            git fetch origin master 2>/dev/null || true
+            
+            # Check if our commit is based on latest origin/master
+            if ! git merge-base --is-ancestor origin/master HEAD 2>/dev/null; then
+              echo "::warning::Remote has new commits, rebasing..."
+              
+              if ! git rebase origin/master 2>/dev/null; then
+                echo "::warning::Rebase conflict, resetting and reapplying changes..."
+                git rebase --abort 2>/dev/null || true
+                git reset --hard origin/master
+                
+                # Reapply as builder
+                safe_update_pkgbuild_version PKGBUILD "$VERSION"
+                chown -R builder:builder .
+                if ! su builder -c 'updpkgsums' 2>&1; then
+                  echo "::warning::Failed to regenerate checksums during retry"
+                  sleep $((attempt * 2))
+                  continue
+                fi
+                su builder -c "
+                  makepkg --printsrcinfo > .SRCINFO
+                  git add PKGBUILD .SRCINFO
+                  git commit -m '$commit_msg'
+                "
+                chown -R root:root .
+              fi
+            fi
+            
+            # Push (requires root for SSH)
+            if git push origin master 2>&1; then
+              push_success=true
+              echo "Successfully pushed $PKG to AUR"
+              echo "status=success" >> "$GITHUB_OUTPUT"
+              break
+            fi
+            
+            echo "::warning::Push attempt $attempt failed, retrying in $((attempt * RETRY_DELAY_BASE))s..."
+            sleep $((attempt * RETRY_DELAY_BASE))
+          done
+
+          if [ "$push_success" != "true" ]; then
+            echo "::error::Failed to push $PKG after 3 attempts"
+            echo "::error::Check SSH key permissions and verify no conflicting updates on AUR"
+            exit 1
+          fi
+
+      - name: Update Summary
+        if: always()
+        env:
+          PKG: ${{ matrix.package }}
+          VERSION: ${{ matrix.version }}
+          STATUS: ${{ steps.update.outputs.status }}
+          RESULT: ${{ steps.update.outcome }}
+        run: |
+          {
+            echo "## Update Result: $PKG"
+            echo ""
+            echo "| Package | Version | Status |"
+            echo "|---------|---------|--------|"
+            if [ "$RESULT" = "success" ]; then
+              if [ "$STATUS" = "success" ]; then
+                echo "| $PKG | $VERSION | ✅ Updated |"
+              else
+                echo "| $PKG | $VERSION | ⚠️ No changes |"
+              fi
+            else
+              echo "| $PKG | $VERSION | ❌ Failed |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

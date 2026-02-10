@@ -1,0 +1,55 @@
+name: Install AUR Tools
+description: Install common tools for AUR package management in Arch Linux container
+
+inputs:
+  packages:
+    description: Additional packages to install (space-separated)
+    required: false
+    default: ""
+  create-builder:
+    description: Whether to create a builder user for makepkg
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Tools
+      shell: bash -euo pipefail {0}
+      env:
+        EXTRA_PACKAGES: ${{ inputs.packages }}
+      run: |
+        # shellcheck disable=SC2086
+        # Base packages always needed
+        base_packages=(git openssh)
+
+        # Combine with extra packages (word splitting is intentional here)
+        read -ra extra_array <<< "$EXTRA_PACKAGES"
+        all_packages=("${base_packages[@]}" "${extra_array[@]}")
+
+        echo "Installing: ${all_packages[*]}"
+        pacman -Syu --noconfirm --needed "${all_packages[@]}"
+
+    - name: Create Builder User
+      if: inputs.create-builder == 'true'
+      shell: bash -euo pipefail {0}
+      run: |
+        if ! id builder &>/dev/null; then
+          useradd -m builder
+          
+          # Use sudoers.d for better maintainability and security
+          SUDOERS_FILE="/etc/sudoers.d/builder-pacman"
+          echo "builder ALL=(ALL) NOPASSWD: /usr/bin/pacman" > "$SUDOERS_FILE"
+          chmod 440 "$SUDOERS_FILE"
+          
+          # Validate sudoers syntax
+          if ! visudo -c -f "$SUDOERS_FILE" >/dev/null 2>&1; then
+            echo "::error::Invalid sudoers syntax"
+            rm -f "$SUDOERS_FILE"
+            exit 1
+          fi
+          
+          echo "Builder user created"
+        else
+          echo "Builder user already exists"
+        fi
