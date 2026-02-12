@@ -29,9 +29,9 @@ retry_command() {
   return 1
 }
 
-# Safe awk-based replacement for pkgver/pkgrel (handles all special characters)
-# Usage: safe_update_pkgbuild_version <file> <new_version>
-safe_update_pkgbuild_version() {
+# Replace pkgver/pkgrel in a PKGBUILD using awk (avoids sed escaping issues)
+# Usage: update_pkgbuild_version <file> <new_version>
+update_pkgbuild_version() {
   local file="$1"
   local new_version="$2"
   local temp_file
@@ -40,12 +40,18 @@ safe_update_pkgbuild_version() {
   # shellcheck disable=SC2064
   trap "rm -f '$temp_file'" RETURN
   
-  # Use awk to safely replace version without sed escaping issues
   awk -v new_ver="$new_version" '
     /^pkgver=/ { print "pkgver=" new_ver; next }
     /^pkgrel=/ { print "pkgrel=1"; next }
     { print }
   ' "$file" > "$temp_file" && mv "$temp_file" "$file"
+}
+
+# Strip known GitHub token patterns from text
+# Usage: sanitize_log <file>
+# Output: sanitized content to stdout
+sanitize_log() {
+  sed -E 's/(ghp_|github_pat_|ghs_|gho_|ghu_|ghr_)[a-zA-Z0-9_]*/[REDACTED]/g' "$1"
 }
 
 # Retry HTTP request with exponential backoff (for AUR API)
@@ -62,7 +68,7 @@ retry_http_request() {
   HTTP_CODE=""
   for attempt in $(seq 1 "$max_attempts"); do
     # shellcheck disable=SC2034
-    http_code=$(curl -s -w "%{http_code}" -o "$output_file" "$url" 2>/dev/null || true)
+    http_code=$(curl -s --connect-timeout 10 --max-time 30 -w "%{http_code}" -o "$output_file" "$url" 2>/dev/null || true)
     if [ "$http_code" = "200" ]; then
       HTTP_CODE="$http_code"
       return 0
