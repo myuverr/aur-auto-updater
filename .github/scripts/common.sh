@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MPL-2.0
 
-# Common utility functions for AUR update workflow
+# Shared helper functions for workflow scripts
 # shellcheck shell=bash
 
 set -euo pipefail
 
-# Retry a command with exponential backoff
-# Usage: retry_command <max_attempts> <base_delay> <command...>
-# Example: retry_command 3 2 curl -sf "$url"
+# retry_command <max_attempts> <base_delay_s> <command...>
+# Retries with linear backoff: attempt * base_delay
 retry_command() {
   local max_attempts="$1"
   local base_delay="$2"
@@ -29,34 +28,40 @@ retry_command() {
   return 1
 }
 
-# Replace pkgver/pkgrel in a PKGBUILD using awk (avoids sed escaping issues)
-# Usage: update_pkgbuild_version <file> <new_version>
+# update_pkgbuild_version <file> <new_version>
+# Rewrites pkgver and resets pkgrel to 1
 update_pkgbuild_version() {
   local file="$1"
   local new_version="$2"
   local temp_file
-  
+
   temp_file=$(mktemp)
-  # shellcheck disable=SC2064
-  trap "rm -f '$temp_file'" RETURN
-  
+
   awk -v new_ver="$new_version" '
     /^pkgver=/ { print "pkgver=" new_ver; next }
     /^pkgrel=/ { print "pkgrel=1"; next }
     { print }
-  ' "$file" > "$temp_file" && mv "$temp_file" "$file"
+  ' "$file" > "$temp_file" && mv "$temp_file" "$file" || { rm -f "$temp_file"; return 1; }
 }
 
-# Strip known GitHub token patterns from text
-# Usage: sanitize_log <file>
-# Output: sanitized content to stdout
+# sanitize_log <file> [max_lines]
+# Emits redacted log content to stdout
 sanitize_log() {
-  sed -E 's/(ghp_|github_pat_|ghs_|gho_|ghu_|ghr_)[a-zA-Z0-9_]*/[REDACTED]/g' "$1"
+  local file="$1"
+  local max_lines="${2:-}"
+  local input
+  if [ -n "$max_lines" ]; then
+    input=$(sed -n "1,${max_lines}p" "$file")
+  else
+    input=$(cat "$file")
+  fi
+  printf '%s' "$input" | sed -E \
+    -e 's/(ghp_|github_pat_|ghs_|gho_|ghu_|ghr_)[a-zA-Z0-9_]*/[REDACTED]/g' \
+    -e 's/\b[0-9a-f]{40}\b/[REDACTED]/g'
 }
 
-# Retry HTTP request with exponential backoff (for AUR API)
-# Usage: retry_http_request <output_file> <url> <max_attempts> <base_delay> <rate_limit_delay>
-# Returns: Sets global HTTP_CODE variable, returns 0 on success, 1 on failure
+# retry_http_request <output_file> <url> [max_attempts] [base_delay] [rate_limit_delay]
+# Retries HTTP fetch, using a separate delay path for HTTP 429
 retry_http_request() {
   local output_file="$1"
   local url="$2"
@@ -65,12 +70,9 @@ retry_http_request() {
   local rate_limit_delay="${5:-5}"
   local attempt http_code
   
-  HTTP_CODE=""
   for attempt in $(seq 1 "$max_attempts"); do
-    # shellcheck disable=SC2034
     http_code=$(curl -s --connect-timeout 10 --max-time 30 -w "%{http_code}" -o "$output_file" "$url" 2>/dev/null || true)
     if [ "$http_code" = "200" ]; then
-      HTTP_CODE="$http_code"
       return 0
     elif [ "$http_code" = "429" ]; then
       echo "::warning::HTTP 429 rate limited, waiting before retry (attempt $attempt/$max_attempts)..."
@@ -81,6 +83,20 @@ retry_http_request() {
     fi
   done
   
-  HTTP_CODE="$http_code"
   return 1
+}
+
+# strip_version_prefix removes a leading 'v'
+strip_version_prefix() {
+  echo "${1#v}"
+}
+
+# strip_pkgrel removes a trailing -pkgrel suffix
+strip_pkgrel() {
+  echo "$1" | sed 's/-[0-9]*$//'
+}
+
+# strip_epoch removes an epoch prefix (`N:`)
+strip_epoch() {
+  echo "${1#*:}"
 }

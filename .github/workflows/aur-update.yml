@@ -3,32 +3,29 @@ name: AUR Auto Updater
 
 on:
   schedule:
-    - cron: "0 0,12 * * *" # Run at 0:00 and 12:00 UTC daily
-  workflow_dispatch: # Allow manual triggering
-
-permissions:
-  contents: write
+    - cron: "0 0,12 * * *" # 00:00 and 12:00 UTC daily
+  workflow_dispatch: # Manual trigger
 
 concurrency:
   group: aur-update
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 defaults:
   run:
-    # Use bash with strict mode to catch errors early
-    # -e: exit on error, -u: error on undefined vars, -o pipefail: catch pipe failures
+    # Enforce strict shell semantics for all run steps
     shell: bash -euo pipefail {0}
 
 env:
-  # Retry configuration
+  # Shared retry settings
   RETRY_MAX_ATTEMPTS: 4
   RETRY_DELAY_BASE: 3
   AUR_RATE_LIMIT_DELAY: 5
-  # Job summary size limit (GitHub limit is 1MB, leave margin)
-  MAX_SUMMARY_SIZE: 900000
 
 jobs:
-  # Job 1: Check which packages need updates
+  # Detect update candidates
   check-versions:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
@@ -36,6 +33,7 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       has_updates: ${{ steps.set-matrix.outputs.has_updates }}
+      error_count: ${{ steps.set-matrix.outputs.error_count }}
 
     steps:
       - name: Checkout Config
@@ -50,50 +48,17 @@ jobs:
         env:
           PACKAGES_CONFIG: ${{ vars.PACKAGES_CONFIG }}
           GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          # shellcheck shell=bash
-          if [ -z "${PACKAGES_CONFIG:-}" ]; then
-            echo "::error::PACKAGES_CONFIG variable not set. Configure it in repository settings."
-            exit 1
-          fi
-
-          # Generate keyfile.toml with GH_PAT
-          echo '[keys]' > keyfile.toml
-          echo "github = \"$GH_PAT\"" >> keyfile.toml
-
-          # Generate nvchecker.toml header with keyfile reference
-          cat > nvchecker.toml << 'EOF'
-          [__config__]
-          oldver = "old_ver.json"
-          keyfile = "keyfile.toml"
-          EOF
-
-          # Parse JSON and generate package sections
-          echo "$PACKAGES_CONFIG" | jq -r 'to_entries[] | 
-            "[\(.key)]\nsource = \"github\"\ngithub = \"\(.value.github)\"\n" +
-            (if .value.use_latest_release then "use_latest_release = true\n" else "" end) +
-            (if .value.use_max_tag then "use_max_tag = true\n" else "" end) +
-            (if .value.prefix then "prefix = \"\(.value.prefix)\"\n" else "" end) +
-            (if .value.include_regex then "include_regex = '\''\(.value.include_regex)'\''\n" else "" end)
-          ' >> nvchecker.toml
-
-          # Extract package names for iteration
-          PACKAGES=$(echo "$PACKAGES_CONFIG" | jq -r 'keys | join(" ")')
-          echo "PACKAGES=$PACKAGES" >> "$GITHUB_ENV"
-
-          echo "Generated nvchecker.toml for packages: $PACKAGES"
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/generate-nvchecker-config.sh"
 
       - name: Check Package Versions
         id: set-matrix
         run: bash "$GITHUB_WORKSPACE/.github/scripts/check-versions.sh"
 
-      - name: Fail if Errors Occurred
-        if: steps.set-matrix.outputs.error_count != '0'
-        run: |
-          echo "::error::Version check completed with errors. Check the summary for details."
-          exit 1
+      - name: Cleanup Keyfile
+        if: always()
+        run: rm -f keyfile.toml
 
-  # Job 2: Update each package in parallel
+  # Update packages concurrently
   update-package:
     needs: check-versions
     if: needs.check-versions.outputs.has_updates == 'true'
@@ -129,32 +94,45 @@ jobs:
         uses: ./.github/actions/setup-aur-ssh
 
       - name: Update ${{ matrix.package }}
-        id: update
         env:
           PKG: ${{ matrix.package }}
           VERSION: ${{ matrix.version }}
         run: bash "$GITHUB_WORKSPACE/.github/scripts/update-package.sh"
 
-      - name: Update Summary
-        if: always()
+  # Aggregate job outcomes and fail on errors
+  report-status:
+    if: always()
+    needs: [check-versions, update-package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Evaluate Results
         env:
-          PKG: ${{ matrix.package }}
-          VERSION: ${{ matrix.version }}
-          STATUS: ${{ steps.update.outputs.status }}
-          RESULT: ${{ steps.update.outcome }}
+          ERROR_COUNT: ${{ needs.check-versions.outputs.error_count }}
+          CHECK_RESULT: ${{ needs.check-versions.result }}
+          UPDATE_RESULT: ${{ needs.update-package.result }}
         run: |
-          {
-            echo "## Update Result: $PKG"
-            echo ""
-            echo "| Package | Version | Status |"
-            echo "|---------|---------|--------|"
-            if [ "$RESULT" = "success" ]; then
-              if [ "$STATUS" = "success" ]; then
-                echo "| $PKG | $VERSION | ✅ Updated |"
-              else
-                echo "| $PKG | $VERSION | ⚠️ No changes |"
-              fi
-            else
-              echo "| $PKG | $VERSION | ❌ Failed |"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          failed=false
+
+          if [ "${ERROR_COUNT:-0}" -gt 0 ]; then
+            echo "::error::$ERROR_COUNT package(s) had version-check errors (see check-versions summary)"
+            failed=true
+          fi
+
+          if [ "$CHECK_RESULT" = "failure" ] || [ "$CHECK_RESULT" = "cancelled" ]; then
+            echo "::error::check-versions job $CHECK_RESULT"
+            failed=true
+          fi
+
+          # update-package is expected to be skipped when no updates are found
+          if [ "$UPDATE_RESULT" = "failure" ] || [ "$UPDATE_RESULT" = "cancelled" ]; then
+            echo "::error::update-package job $UPDATE_RESULT (see update-package summary)"
+            failed=true
+          fi
+
+          if [ "$failed" = "true" ]; then
+            echo "::error::Workflow completed with errors — review job summaries above"
+            exit 1
+          fi
+
+          echo "All checks and updates completed successfully"

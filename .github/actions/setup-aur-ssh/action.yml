@@ -9,36 +9,32 @@ runs:
       shell: bash -euo pipefail {0}
       run: |
         # shellcheck shell=bash
-        # Cleanup on exit (success or failure)
-        trap 'rm -f /tmp/aur_key' EXIT
+        # shellcheck source=../../scripts/common.sh
+        source "$GITHUB_WORKSPACE/.github/scripts/common.sh"
+
+        aur_key_file=$(mktemp)
+        # Remove temporary key file on exit
+        trap 'rm -f "$aur_key_file"' EXIT
 
         mkdir -p "$HOME/.ssh"
         chmod 700 "$HOME/.ssh"
 
-        # Official AUR Ed25519 fingerprint
+        # Pinned AUR Ed25519 fingerprint
         expected_fingerprint="SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4"
 
-        # Fetch host key with retry
-        max_attempts=3
-        for attempt in $(seq 1 "$max_attempts"); do
-          if ssh-keyscan -t ed25519 aur.archlinux.org > /tmp/aur_key 2>/dev/null && [ -s /tmp/aur_key ]; then
-            break
-          fi
-          echo "Attempt $attempt failed, retrying..."
-          sleep $((attempt * 2))
-          if [ "$attempt" -eq "$max_attempts" ]; then
-            echo "::error::Failed to fetch AUR SSH host key after $max_attempts attempts"
-            exit 1
-          fi
-        done
+        # Retry ssh-keyscan to tolerate transient network failures
+        if ! retry_command "${RETRY_MAX_ATTEMPTS:-3}" "${RETRY_DELAY_BASE:-2}" sh -c "ssh-keyscan -t ed25519 aur.archlinux.org > $aur_key_file 2>/dev/null && [ -s $aur_key_file ]"; then
+          echo "::error::Failed to fetch AUR SSH host key after ${RETRY_MAX_ATTEMPTS:-3} attempts"
+          exit 1
+        fi
 
-        scanned_fingerprint=$(ssh-keygen -lf /tmp/aur_key | awk '{print $2}')
+        scanned_fingerprint=$(ssh-keygen -lf "$aur_key_file" | awk '{print $2}')
 
         if [ "$scanned_fingerprint" != "$expected_fingerprint" ]; then
           echo "::error::AUR SSH fingerprint mismatch! Expected: $expected_fingerprint, Got: $scanned_fingerprint"
           exit 1
         fi
 
-        cat /tmp/aur_key >> "$HOME/.ssh/known_hosts"
+        cat "$aur_key_file" >> "$HOME/.ssh/known_hosts"
         chmod 600 "$HOME/.ssh/known_hosts"
         echo "AUR host key verified and added"

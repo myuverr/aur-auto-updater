@@ -21,10 +21,10 @@ runs:
         EXTRA_PACKAGES: ${{ inputs.packages }}
       run: |
         # shellcheck disable=SC2086
-        # Base packages always needed
+        # Base packages required in all runs
         base_packages=(git openssh)
 
-        # Combine with extra packages (word splitting is intentional here)
+        # Split optional package list intentionally
         read -ra extra_array <<< "$EXTRA_PACKAGES"
         all_packages=("${base_packages[@]}" "${extra_array[@]}")
 
@@ -38,12 +38,12 @@ runs:
         if ! id builder &>/dev/null; then
           useradd -m builder
           
-          # Use sudoers.d for better maintainability and security
+          # Grant builder pacman via a dedicated sudoers drop-in
           SUDOERS_FILE="/etc/sudoers.d/builder-pacman"
           echo "builder ALL=(ALL) NOPASSWD: /usr/bin/pacman" > "$SUDOERS_FILE"
           chmod 440 "$SUDOERS_FILE"
           
-          # Validate sudoers syntax
+          # Validate sudoers syntax before continuing
           if ! visudo -c -f "$SUDOERS_FILE" >/dev/null 2>&1; then
             echo "::error::Invalid sudoers syntax"
             rm -f "$SUDOERS_FILE"
