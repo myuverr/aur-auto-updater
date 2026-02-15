@@ -64,8 +64,8 @@ for pkg in $PACKAGES; do
     continue
   fi
 
-  # Normalize upstream tag format
-  latest_ver=$(strip_version_prefix "$latest_ver_raw")
+  # nvchecker `prefix` handles tag prefix stripping.
+  latest_ver="$latest_ver_raw"
   echo "Upstream: $latest_ver"
 
   # Query current version from AUR RPC

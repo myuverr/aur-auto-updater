@@ -86,10 +86,6 @@ retry_http_request() {
   return 1
 }
 
-# strip_version_prefix removes a leading 'v'
-strip_version_prefix() {
-  echo "${1#v}"
-}
 
 # strip_pkgrel removes a trailing -pkgrel suffix
 strip_pkgrel() {

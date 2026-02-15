@@ -13,6 +13,12 @@ if [ -z "${PACKAGES_CONFIG:-}" ]; then
   exit 1
 fi
 
+# Validate PACKAGES_CONFIG JSON before rendering files.
+if ! echo "$PACKAGES_CONFIG" | jq empty 2>/dev/null; then
+  echo "::error::PACKAGES_CONFIG is not valid JSON"
+  exit 1
+fi
+
 # Write keyfile.toml with GH_PAT
 {
   echo '[keys]'
@@ -28,12 +34,25 @@ keyfile = "keyfile.toml"
 EOF2
 
 # Append package sections from PACKAGES_CONFIG
-echo "$PACKAGES_CONFIG" | jq -r 'to_entries[] | 
-  "[\(.key)]\nsource = \"github\"\ngithub = \"\(.value.github)\"\n" +
-  (if .value.use_latest_release then "use_latest_release = true\n" else "" end) +
-  (if .value.use_max_tag then "use_max_tag = true\n" else "" end) +
-  (if .value.prefix then "prefix = \"\(.value.prefix)\"\n" else "" end) +
-  (if .value.include_regex then "include_regex = '\''\(.value.include_regex)'\''\n" else "" end)
+# Render each package object as TOML using type-aware value encoding.
+echo "$PACKAGES_CONFIG" | jq -r '
+  to_entries[] |
+  "\n[\(.key)]" as $header |
+  [
+    $header,
+    (
+      .value | to_entries[] |
+      if .value == true then
+        "\(.key) = true"
+      elif .value == false then
+        "\(.key) = false"
+      elif (.value | type) == "number" then
+        "\(.key) = \(.value)"
+      else
+        "\(.key) = \"\(.value)\""
+      end
+    )
+  ] | join("\n")
 ' >> nvchecker.toml
 
 # Export package list for downstream steps
