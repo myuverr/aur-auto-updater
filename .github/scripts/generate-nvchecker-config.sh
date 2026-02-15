@@ -42,14 +42,17 @@ echo "$PACKAGES_CONFIG" | jq -r '
     $header,
     (
       .value | to_entries[] |
-      if .value == true then
-        "\(.key) = true"
-      elif .value == false then
-        "\(.key) = false"
-      elif (.value | type) == "number" then
+      (.value | type) as $type |
+      if $type == "boolean" then
         "\(.key) = \(.value)"
+      elif $type == "number" then
+        "\(.key) = \(.value)"
+      elif $type == "string" then
+        # Use JSON string encoding so TOML special chars (for example \d in regex)
+        # are emitted as escaped backslashes rather than invalid TOML escapes.
+        "\(.key) = \(.value | @json)"
       else
-        "\(.key) = \"\(.value)\""
+        "\(.key) = \((.value | tostring) | @json)"
       end
     )
   ] | join("\n")
