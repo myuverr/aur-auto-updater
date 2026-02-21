@@ -29,6 +29,10 @@ include_regex = "^v[0-9.]+$"
 prefix = "v"
 ```
 
+> **Note:** `PACKAGES_CONFIG` must contain only `[package-name]` table sections.
+> `[__config__]` is auto-generated and will be ignored if present.
+> Top-level scalar or array keys (e.g. `foo = "bar"`) will also be ignored.
+
 ## License
 
 This project is licensed under the [Mozilla Public License 2.0](LICENSE).

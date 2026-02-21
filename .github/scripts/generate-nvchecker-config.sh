@@ -13,19 +13,12 @@ if [ -z "${PACKAGES_CONFIG:-}" ]; then
   exit 1
 fi
 
-# Validate TOML and extract package list
-PACKAGES=$(printf '%s' "$PACKAGES_CONFIG" | python3 -c '
-import sys, tomllib
-try:
-    data = tomllib.loads(sys.stdin.read())
-except tomllib.TOMLDecodeError as e:
-    print(f"::error::PACKAGES_CONFIG is not valid TOML: {e}", file=sys.stderr)
-    sys.exit(1)
-if not data:
-    print("::error::PACKAGES_CONFIG contains no package sections", file=sys.stderr)
-    sys.exit(1)
-print(" ".join(data.keys()))
-')
+# Validate TOML, extract package list, and write cleaned config
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLEANED_CONFIG_FILE=$(mktemp)
+trap 'rm -f "$CLEANED_CONFIG_FILE"' EXIT
+
+PACKAGES=$(printf '%s' "$PACKAGES_CONFIG" | python3 "$SCRIPT_DIR/validate_packages_config.py" "$CLEANED_CONFIG_FILE")
 
 # Write keyfile.toml with GH_PAT
 {
@@ -41,7 +34,8 @@ oldver = "old_ver.json"
 keyfile = "keyfile.toml"
 EOF
 
-printf '\n%s\n' "$PACKAGES_CONFIG" >> nvchecker.toml
+# Append cleaned package sections
+cat "$CLEANED_CONFIG_FILE" >> nvchecker.toml
 
 # Export package list for downstream steps
 echo "PACKAGES=$PACKAGES" >> "$GITHUB_ENV"
