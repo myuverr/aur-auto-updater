@@ -13,11 +13,19 @@ if [ -z "${PACKAGES_CONFIG:-}" ]; then
   exit 1
 fi
 
-# Validate PACKAGES_CONFIG JSON before rendering files.
-if ! echo "$PACKAGES_CONFIG" | jq empty 2>/dev/null; then
-  echo "::error::PACKAGES_CONFIG is not valid JSON"
-  exit 1
-fi
+# Validate TOML and extract package list
+PACKAGES=$(printf '%s' "$PACKAGES_CONFIG" | python3 -c '
+import sys, tomllib
+try:
+    data = tomllib.loads(sys.stdin.read())
+except tomllib.TOMLDecodeError as e:
+    print(f"::error::PACKAGES_CONFIG is not valid TOML: {e}", file=sys.stderr)
+    sys.exit(1)
+if not data:
+    print("::error::PACKAGES_CONFIG contains no package sections", file=sys.stderr)
+    sys.exit(1)
+print(" ".join(data.keys()))
+')
 
 # Write keyfile.toml with GH_PAT
 {
@@ -27,39 +35,15 @@ fi
 chmod 600 keyfile.toml
 
 # Write nvchecker.toml header
-cat > nvchecker.toml << 'EOF2'
+cat > nvchecker.toml << 'EOF'
 [__config__]
 oldver = "old_ver.json"
 keyfile = "keyfile.toml"
-EOF2
+EOF
 
-# Append package sections from PACKAGES_CONFIG
-# Render each package object as TOML using type-aware value encoding.
-echo "$PACKAGES_CONFIG" | jq -r '
-  to_entries[] |
-  "\n[\(.key)]" as $header |
-  [
-    $header,
-    (
-      .value | to_entries[] |
-      (.value | type) as $type |
-      if $type == "boolean" then
-        "\(.key) = \(.value)"
-      elif $type == "number" then
-        "\(.key) = \(.value)"
-      elif $type == "string" then
-        # Use JSON string encoding so TOML special chars (for example \d in regex)
-        # are emitted as escaped backslashes rather than invalid TOML escapes.
-        "\(.key) = \(.value | @json)"
-      else
-        "\(.key) = \((.value | tostring) | @json)"
-      end
-    )
-  ] | join("\n")
-' >> nvchecker.toml
+printf '\n%s\n' "$PACKAGES_CONFIG" >> nvchecker.toml
 
 # Export package list for downstream steps
-PACKAGES=$(echo "$PACKAGES_CONFIG" | jq -r 'keys | join(" ")')
 echo "PACKAGES=$PACKAGES" >> "$GITHUB_ENV"
 
 echo "Generated nvchecker.toml for packages: $PACKAGES"

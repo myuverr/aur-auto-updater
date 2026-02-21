@@ -11,23 +11,22 @@ Set these in repository Secrets/Variables:
   * `AUR_SSH_KEY`: Private SSH key for AUR.
   * `GH_PAT`: GitHub PAT (for read-only access to public repos).
 * **Variables**
-  * `PACKAGES_CONFIG`: JSON package list.
+  * `PACKAGES_CONFIG`: nvchecker package sections (TOML).
 
 **PACKAGES_CONFIG Example:**
 
-```json
-{
-  "package-name": {
-    "github": "upstream-owner/repo",
-    "use_latest_release": true,
-    "prefix": "v"
-  },
-  "another-package": {
-    "github": "upstream-owner/other-repo",
-    "use_max_tag": true,
-    "include_regex": "^v[0-9.]+$"
-  }
-}
+```toml
+[package-a]
+source = "github"
+github = "owner-a/repo-a"
+use_latest_release = true
+
+[package-b]
+source = "github"
+github = "owner-b/repo-b"
+use_max_tag = true
+include_regex = "^v[0-9.]+$"
+prefix = "v"
 ```
 
 ## License
