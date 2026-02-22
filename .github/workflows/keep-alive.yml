@@ -17,11 +17,22 @@ jobs:
 
       - name: Update Keep-Alive Timestamp
         run: |
-          KEEPALIVE_FILE=".github/.keepalive"
-          date +%s > "$KEEPALIVE_FILE"
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Switch to keepalive branch, or create orphan if it doesn't exist
+          if git ls-remote --exit-code --heads origin keepalive >/dev/null 2>&1; then
+            git fetch origin keepalive:keepalive
+            git checkout keepalive
+          else
+            git checkout --orphan keepalive
+            git rm -rf .
+          fi
+
+          KEEPALIVE_FILE=".github/.keepalive"
+          mkdir -p "$(dirname "$KEEPALIVE_FILE")"
+          date +%s > "$KEEPALIVE_FILE"
+
           git add "$KEEPALIVE_FILE"
           git diff --cached --quiet || git commit -m "chore: keep alive [skip ci]"
-          git push
+          git push origin keepalive
