@@ -97,6 +97,7 @@ jobs:
         env:
           PKG: ${{ matrix.package }}
           VERSION: ${{ matrix.version }}
+          AUR_GIT_USER: ${{ secrets.AUR_GIT_USER }}
         run: bash "$GITHUB_WORKSPACE/.github/scripts/update-package.sh"
 
   # Aggregate job outcomes and fail on errors

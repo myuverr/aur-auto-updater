@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MPL-2.0
 
 # Update one AUR package to VERSION
-# Required env: PKG, VERSION, RETRY_MAX_ATTEMPTS, RETRY_DELAY_BASE
+# Required env: PKG, VERSION, AUR_GIT_USER, RETRY_MAX_ATTEMPTS, RETRY_DELAY_BASE
 # shellcheck shell=bash
 
 set -euo pipefail
@@ -55,9 +55,14 @@ fi
 
 cd "$PKG"
 
-# Configure git identity for this repo
-git config user.name "github-actions[bot]"
-git config user.email "github-actions[bot]@users.noreply.github.com"
+# Configure git identity for AUR commits
+# AUR_GIT_USER format: "Name <email>"
+if [[ ! "$AUR_GIT_USER" =~ ^(.+)' <'(.+)'>'$ ]]; then
+  echo "::error::AUR_GIT_USER must be in 'Name <email>' format"
+  exit 1
+fi
+git config user.name "${BASH_REMATCH[1]}"
+git config user.email "${BASH_REMATCH[2]}"
 
 # Validate PKGBUILD presence
 if [ ! -f PKGBUILD ]; then

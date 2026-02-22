@@ -9,6 +9,7 @@ Set these in repository Secrets/Variables:
 
 * **Secrets**
   * `AUR_SSH_KEY`: Private SSH key for AUR.
+  * `AUR_GIT_USER`: Git identity for AUR commits, format: `Name <email>`.
   * `GH_PAT`: GitHub PAT (for read-only access to public repos).
 * **Variables**
   * `PACKAGES_CONFIG`: nvchecker package sections (TOML).
