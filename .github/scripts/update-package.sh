@@ -123,7 +123,9 @@ push_to_aur() {
           echo "No changes after refresh — already up to date"
         elif [ "$refresh_exit" -ne 0 ]; then
           echo "::warning::Failed to regenerate checksums during retry"
-          sleep $((attempt * 2))
+          if [ "$attempt" -lt "$RETRY_MAX_ATTEMPTS" ]; then
+            sleep "$(_calc_backoff "$attempt" "$RETRY_DELAY_BASE")"
+          fi
           continue
         fi
       fi
@@ -135,8 +137,11 @@ push_to_aur() {
       return 0
     fi
 
-    echo "::warning::Push attempt $attempt failed, retrying in $((attempt * RETRY_DELAY_BASE))s..."
-    sleep $((attempt * RETRY_DELAY_BASE))
+    if [ "$attempt" -lt "$RETRY_MAX_ATTEMPTS" ]; then
+      local w; w=$(_calc_backoff "$attempt" "$RETRY_DELAY_BASE")
+      echo "::warning::Push attempt $attempt failed, retrying in ${w}s..."
+      sleep "$w"
+    fi
   done
 
   return 1
