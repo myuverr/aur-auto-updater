@@ -19,7 +19,7 @@ export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o Stri
 run_as_builder() {
   local rc=0
   chown -R builder:builder .
-  if su builder -s /bin/bash -- "$BUILDER_SCRIPT" "$@" 2>&1; then
+  if runuser -u builder -m -- /bin/bash "$BUILDER_SCRIPT" "$@" 2>&1; then
     rc=0
   else
     rc=$?
@@ -74,6 +74,8 @@ fi
 current_ver=$(awk -F= '/^pkgver=/{print $2}' PKGBUILD)
 echo "Current version: $current_ver"
 
+base_head=$(git rev-parse HEAD)
+
 update_pkgbuild_version PKGBUILD "$VERSION"
 
 # Build and commit in builder context
@@ -86,6 +88,15 @@ else
     echo "::error::This may indicate AUR was already updated or version detection issue"
     UPDATE_STATUS="no_changes"
     exit 1
+  fi
+  exit 1
+fi
+
+new_head=$(git rev-parse HEAD)
+if [ "$new_head" = "$base_head" ]; then
+  echo "::error::Builder step exited successfully but did not create a new commit"
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "::error::Repository still has uncommitted changes after builder step"
   fi
   exit 1
 fi
