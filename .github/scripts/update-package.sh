@@ -19,7 +19,11 @@ export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o Stri
 run_as_builder() {
   local rc=0
   chown -R builder:builder .
-  if runuser -u builder -m -- /bin/bash "$BUILDER_SCRIPT" "$@" 2>&1; then
+  if runuser -u builder -- env \
+    GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+    RETRY_MAX_ATTEMPTS="${RETRY_MAX_ATTEMPTS:-3}" \
+    RETRY_DELAY_BASE="${RETRY_DELAY_BASE:-3}" \
+    /bin/bash "$BUILDER_SCRIPT" "$@" 2>&1; then
     rc=0
   else
     rc=$?
