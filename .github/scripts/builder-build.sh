@@ -34,7 +34,7 @@ if [ "$MODE" = "--refresh-only" ]; then
 else
   # Full path: verify build, regenerate metadata, then commit
   echo 'Verifying build...'
-  makepkg -sfr --noconfirm
+  paru -Bi --noconfirm --skipreview --removemake .
   echo 'Build verified'
 
   makepkg --printsrcinfo > .SRCINFO
