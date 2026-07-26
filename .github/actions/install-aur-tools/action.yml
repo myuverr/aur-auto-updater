@@ -8,7 +8,7 @@ inputs:
     required: false
     default: ""
   create-builder:
-    description: Whether to create a builder user with paru for makepkg
+    description: Whether to create a builder user for makepkg
     required: false
     default: "false"
 
@@ -30,28 +30,6 @@ runs:
 
         echo "Installing: ${all_packages[*]}"
         pacman -Syu --noconfirm --needed "${all_packages[@]}"
-
-    - name: Install paru
-      if: inputs.create-builder == 'true'
-      shell: bash -euo pipefail {0}
-      run: |
-        # Build paru from source; paru-bin is out of date and breaks on system libalpm upgrades
-        pacman -S --noconfirm --needed rust
-
-        useradd -m _paru_build || true
-        echo "_paru_build ALL=(ALL) NOPASSWD: /usr/bin/pacman" > /etc/sudoers.d/_paru_build
-        chmod 440 /etc/sudoers.d/_paru_build
-
-        cd /tmp
-        runuser -u _paru_build -- git clone https://aur.archlinux.org/paru.git
-        cd paru
-        runuser -u _paru_build -- makepkg -si --noconfirm
-
-        # Cleanup temporary build user and artifacts
-        userdel -r _paru_build || true
-        rm -f /etc/sudoers.d/_paru_build
-        rm -rf /tmp/paru
-        echo "paru installed: $(paru --version)"
 
     - name: Create Builder User
       if: inputs.create-builder == 'true'
@@ -76,4 +54,3 @@ runs:
         else
           echo "Builder user already exists"
         fi
-
