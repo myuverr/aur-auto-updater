@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Checkout Config
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install Tools
         uses: ./.github/actions/install-aur-tools
@@ -72,7 +72,7 @@ jobs:
 
     steps:
       - name: Checkout for Composite Action
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           sparse-checkout: |
             .github/actions
