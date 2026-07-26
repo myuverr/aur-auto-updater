@@ -82,6 +82,9 @@ base_head=$(git rev-parse HEAD)
 
 update_pkgbuild_version PKGBUILD "$VERSION"
 
+# Resolve any missing AUR dependencies into local repo before building
+resolve_aur_dependencies
+
 # Build and commit in builder context
 if run_as_builder "$VERSION"; then
   :

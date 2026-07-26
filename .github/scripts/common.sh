@@ -120,3 +120,85 @@ strip_pkgrel() {
 strip_epoch() {
   echo "${1#*:}"
 }
+
+# install_aurutils
+# Bootstraps aurutils from AUR using a temporary build user
+install_aurutils() {
+  if command -v aur &>/dev/null; then
+    return 0
+  fi
+
+  echo "Installing aurutils..."
+  useradd -m _aur_build || true
+  echo "_aur_build ALL=(ALL) SETENV: NOPASSWD: /usr/bin/pacman, /usr/bin/pacsync" > /etc/sudoers.d/_aur_build
+  chmod 440 /etc/sudoers.d/_aur_build
+
+  local orig_dir="$PWD"
+  cd /tmp
+  runuser -u _aur_build -- git clone https://aur.archlinux.org/aurutils.git
+  cd aurutils
+  runuser -u _aur_build -- makepkg -si --noconfirm
+
+  cd "$orig_dir"
+  userdel -r _aur_build || true
+  rm -f /etc/sudoers.d/_aur_build
+  rm -rf /tmp/aurutils
+  echo "aurutils installed: $(aur --version)"
+}
+
+# setup_aur_local_repo
+# Sets up a local pacman repository for AUR dependencies
+setup_aur_local_repo() {
+  local repo_dir="/var/lib/aur-repo"
+  if [ -f "$repo_dir/aur-local.db.tar.gz" ]; then
+    return 0
+  fi
+
+  echo "Setting up local pacman repository for AUR dependencies..."
+  mkdir -p "$repo_dir"
+  chown -R builder:builder "$repo_dir"
+
+  runuser -u builder -- repo-add "$repo_dir/aur-local.db.tar.gz"
+
+  if ! grep -q "\[aur-local\]" /etc/pacman.conf; then
+    cat >> /etc/pacman.conf <<'EOF'
+
+[aur-local]
+SigLevel = Optional TrustAll
+Server = file:///var/lib/aur-repo
+EOF
+  fi
+
+  pacman -Sy
+}
+
+# resolve_aur_dependencies
+# Checks current PKGBUILD/.SRCINFO for non-official dependencies and installs them via aurutils
+resolve_aur_dependencies() {
+  # Regenerate .SRCINFO to reflect updated PKGBUILD
+  runuser -u builder -- makepkg --printsrcinfo > .SRCINFO 2>/dev/null || true
+
+  local deps dep missing_deps=()
+  deps=$(awk '/^\t(depends|makedepends) =/ { sub(/.*= /, ""); sub(/[<>=].*/, ""); print }' .SRCINFO | sort -u)
+
+  for dep in $deps; do
+    if [ -n "$dep" ] && ! pacman -Si "$dep" &>/dev/null; then
+      missing_deps+=("$dep")
+    fi
+  done
+
+  if [ ${#missing_deps[@]} -eq 0 ]; then
+    echo "No AUR dependencies detected."
+    return 0
+  fi
+
+  echo "Detected AUR dependencies: ${missing_deps[*]}"
+
+  install_aurutils
+  setup_aur_local_repo
+
+  for dep in "${missing_deps[@]}"; do
+    echo "Syncing AUR dependency: $dep"
+    runuser -u builder -- env HOME=/home/builder PACMAN_OPTS="--noconfirm" aur sync --no-view --noconfirm -d aur-local "$dep"
+  done
+}

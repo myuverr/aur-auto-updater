@@ -40,7 +40,7 @@ runs:
           
           # Grant builder pacman via a dedicated sudoers drop-in
           SUDOERS_FILE="/etc/sudoers.d/builder-pacman"
-          echo "builder ALL=(ALL) NOPASSWD: /usr/bin/pacman" > "$SUDOERS_FILE"
+          echo "builder ALL=(ALL) SETENV: NOPASSWD: /usr/bin/pacman, /usr/bin/pacsync" > "$SUDOERS_FILE"
           chmod 440 "$SUDOERS_FILE"
           
           # Validate sudoers syntax before continuing
