@@ -175,6 +175,9 @@ EOF
 # resolve_aur_dependencies
 # Checks current PKGBUILD/.SRCINFO for non-official dependencies and installs them via aurutils
 resolve_aur_dependencies() {
+  # Ensure builder user owns current directory so makepkg --printsrcinfo can execute
+  chown -R builder:builder .
+
   # Regenerate .SRCINFO to reflect updated PKGBUILD
   runuser -u builder -- makepkg --printsrcinfo > .SRCINFO 2>/dev/null || true
 
@@ -199,6 +202,6 @@ resolve_aur_dependencies() {
 
   for dep in "${missing_deps[@]}"; do
     echo "Syncing AUR dependency: $dep"
-    runuser -u builder -- env HOME=/home/builder PACMAN_OPTS="--noconfirm" aur sync --no-view --noconfirm -d aur-local "$dep"
+    runuser -u builder -- env HOME=/home/builder aur sync --no-view --noconfirm -d aur-local "$dep"
   done
 }
