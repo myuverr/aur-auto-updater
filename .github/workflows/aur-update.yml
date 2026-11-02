@@ -82,7 +82,7 @@ jobs:
       - name: Install Tools
         uses: ./.github/actions/install-aur-tools
         with:
-          packages: pacman-contrib
+          packages: pacman-contrib expect
           create-builder: "true"
 
       - name: Setup SSH
